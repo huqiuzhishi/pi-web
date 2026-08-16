@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar } from "./SessionSidebar";
 import { ChatWindow } from "./ChatWindow";
+import { CommandConsole } from "./CommandConsole";
 import { FileViewer } from "./FileViewer";
 import { TabBar, type Tab } from "./TabBar";
 import { openFileTab, saveFileViewerState } from "./file-tab-state";
@@ -108,6 +109,7 @@ export function AppShell() {
   const [projectTrustError, setProjectTrustError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
+  const [terminalOpen, setTerminalOpen] = useState(false);
   const [mobileToolbarMoreOpen, setMobileToolbarMoreOpen] = useState(false);
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
   const sidebarWidthRef = useRef(SIDEBAR_DEFAULT_WIDTH);
@@ -1556,6 +1558,43 @@ export function AppShell() {
     );
   };
 
+  const renderTerminalToggle = (mobile: boolean) => {
+    const covered = mobile && mobileToolbarMoreOpen;
+    const disabled = !projectTrustCwd || covered;
+    return (
+      <button
+        type="button"
+        onClick={() => setTerminalOpen((value) => !value)}
+        disabled={disabled}
+        tabIndex={covered ? -1 : undefined}
+        aria-controls="command-console"
+        aria-expanded={terminalOpen}
+        aria-hidden={covered ? true : undefined}
+        title={terminalOpen ? translate("terminal.hide") : translate("terminal.show")}
+        aria-label={terminalOpen ? translate("terminal.hide") : translate("terminal.show")}
+        data-mobile-toolbar-terminal={mobile ? "true" : undefined}
+        style={{
+          display: "flex", alignItems: "center", justifyContent: "center",
+          width: TOP_BAR_ICON_BUTTON_SIZE, height: TOP_BAR_ICON_BUTTON_SIZE, padding: 0,
+          visibility: covered ? "hidden" : "visible",
+          pointerEvents: covered ? "none" : "auto",
+          background: terminalOpen ? "var(--bg-selected)" : "none",
+          border: "none", borderLeft: "1px solid var(--border)",
+          color: terminalOpen ? "var(--text)" : "var(--text-muted)",
+          cursor: disabled ? "not-allowed" : "pointer", opacity: !projectTrustCwd ? 0.45 : 1,
+          flexShrink: 0, transition: "color 0.12s, background 0.12s",
+        }}
+        onMouseEnter={(event) => { if (!disabled) event.currentTarget.style.color = "var(--text)"; }}
+        onMouseLeave={(event) => { event.currentTarget.style.color = terminalOpen ? "var(--text)" : "var(--text-muted)"; }}
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <rect x="3" y="4" width="18" height="16" rx="2" />
+          <path d="m7 9 3 3-3 3" /><path d="M13 15h4" />
+        </svg>
+      </button>
+    );
+  };
+
   const renderMainFileToggle = (mobile: boolean) => {
     const covered = mobile && mobileToolbarMoreOpen;
     return (
@@ -1801,6 +1840,7 @@ export function AppShell() {
                 )}
               </button>
               {renderSessionStatsButton(true)}
+              {renderTerminalToggle(true)}
               {renderMainFileToggle(true)}
               {mobileToolbarMoreOpen && (
                 <div
@@ -1836,6 +1876,7 @@ export function AppShell() {
               {renderSessionStatsButton(false)}
             </>
           )}
+          {!isMobile && renderTerminalToggle(false)}
           {!isMobile && renderMainFileToggle(false)}
           {isMobile && (
             <BranchNavigator
@@ -2180,6 +2221,11 @@ export function AppShell() {
             )
           ) : null}
         </div>
+        <CommandConsole
+          cwd={projectTrustCwd ?? activeCwd}
+          open={terminalOpen}
+          onClose={() => setTerminalOpen(false)}
+        />
       </div>
 
       <div
