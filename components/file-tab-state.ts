@@ -45,6 +45,7 @@ export function openFileTab(tabs: Tab[], input: OpenFileTabInput): Tab[] {
         wrapLines: tab.viewerState?.wrapLines ?? false,
         scrollTop: 0,
         scrollLeft: 0,
+        ...(tab.viewerState?.edit ? { edit: tab.viewerState.edit } : {}),
       };
       next.viewerRevision = (tab.viewerRevision ?? 0) + 1;
     } else if (sourceChanged) {

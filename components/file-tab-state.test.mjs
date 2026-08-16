@@ -96,3 +96,18 @@ test("a remounted viewer ignores the previous revision's late cleanup", () => {
   assert.strictEqual(stale, reopened);
   assert.equal(stale[0].viewerState.displayMode, "diff");
 });
+
+test("an explicit diff activation preserves an unsaved editor buffer", () => {
+  const edit = {
+    active: true,
+    draft: "const answer = 42;\n",
+    baseContent: "const answer = 1;\n",
+    baseVersion: { mtimeMs: 1, size: 18, sha256: "a".repeat(64) },
+    dirty: true,
+  };
+  const tab = { ...tabA, viewerState: { ...tabA.viewerState, edit } };
+  const [reopened] = openFileTab([tab], { ...openA, modeHint: "diff" });
+
+  assert.strictEqual(reopened.viewerState.edit, edit);
+  assert.equal(reopened.viewerState.displayMode, "diff");
+});

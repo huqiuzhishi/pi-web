@@ -5,6 +5,7 @@ import { promisify } from "util";
 import { TEXT_PREVIEW_MAX_BYTES } from "./file-types";
 import type {
   GitFileDiffResponse,
+  GitFileRevertResponse,
   GitFileStatus,
   GitStatusResponse,
 } from "./git-types";
@@ -17,6 +18,19 @@ import {
 const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 10_000;
 const GIT_STATUS_MAX_BUFFER = 8 * 1024 * 1024;
+
+export class GitFileRevertError extends Error {
+  readonly code: "not_repository" | "outside_repository" | "no_changes" | "untracked";
+
+  constructor(
+    code: "not_repository" | "outside_repository" | "no_changes" | "untracked",
+    message: string,
+  ) {
+    super(message);
+    this.name = "GitFileRevertError";
+    this.code = code;
+  }
+}
 
 async function git(cwd: string, args: string[], maxBuffer = GIT_STATUS_MAX_BUFFER): Promise<string> {
   const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
@@ -183,6 +197,50 @@ async function createTrackedFilePatch(
   } catch {
     return null;
   }
+}
+
+export async function revertGitFile(cwd: string, filePath: string): Promise<GitFileRevertResponse> {
+  const repositoryRoot = await findRepositoryRoot(cwd);
+  if (!repositoryRoot) {
+    throw new GitFileRevertError("not_repository", "Not a Git repository");
+  }
+
+  const resolvedFilePath = path.resolve(filePath);
+  if (!isWithinPath(repositoryRoot, resolvedFilePath)) {
+    throw new GitFileRevertError("outside_repository", "File is outside the Git repository");
+  }
+
+  const relativePath = toGitPath(path.relative(repositoryRoot, resolvedFilePath));
+  const entries = await readStatusEntries(repositoryRoot);
+  const entry = entries.find((candidate) => candidate.path === relativePath);
+  if (!entry) {
+    throw new GitFileRevertError("no_changes", "File has no changes to revert");
+  }
+
+  const { status } = classifyGitStatus(entry);
+  if (status === "untracked") {
+    throw new GitFileRevertError("untracked", "Untracked files cannot be reverted");
+  }
+
+  const restorePaths = entry.originalPath && entry.originalPath !== relativePath
+    ? [entry.originalPath, relativePath]
+    : [relativePath];
+  await git(repositoryRoot, [
+    "restore",
+    "--source=HEAD",
+    "--staged",
+    "--worktree",
+    "--",
+    ...restorePaths,
+  ]);
+
+  const restoredRelativePath = status === "added" ? null : entry.originalPath ?? relativePath;
+  return {
+    reverted: true,
+    filePath: restoredRelativePath === null
+      ? null
+      : path.resolve(repositoryRoot, restoredRelativePath),
+  };
 }
 
 export async function getGitFileDiff(cwd: string, filePath: string): Promise<GitFileDiffResponse> {

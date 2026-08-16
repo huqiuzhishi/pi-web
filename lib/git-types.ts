@@ -27,3 +27,9 @@ export interface GitFileDiffResponse {
   status?: GitFileStatusKind;
   patch?: string;
 }
+
+export interface GitFileRevertResponse {
+  reverted: true;
+  /** The path restored from HEAD, or null when reverting removes an added file. */
+  filePath: string | null;
+}

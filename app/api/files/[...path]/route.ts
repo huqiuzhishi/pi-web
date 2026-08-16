@@ -11,7 +11,6 @@ import {
 import {
   DOCX_PREVIEW_MAX_BYTES,
   IMAGE_PREVIEW_MAX_BYTES,
-  TEXT_PREVIEW_MAX_BYTES,
   documentPreviewKind,
   getAudioMime,
   getDocumentMime,
@@ -20,7 +19,7 @@ import {
 } from "@/lib/file-types";
 import { resolveDirentIsDirectory } from "@/lib/file-dirent";
 import { isFilePathReferencedBySession } from "@/lib/session-file-references";
-import { isApiRequestAllowed } from "@/lib/request-security";
+import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import {
   inspectUploadTargets,
   parseUploadConflictStrategy,
@@ -28,6 +27,12 @@ import {
 } from "@/lib/file-upload";
 import { parseFormDataWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { samePath } from "@/lib/paths";
+import {
+  FileEditError,
+  isFileVersion,
+  readTextFileSnapshotSync,
+  writeTextFileIfVersionMatchesSync,
+} from "@/lib/file-edit";
 
 const IGNORED_NAMES = new Set([
   "node_modules", ".git", ".next", "dist", "build", "__pycache__",
@@ -121,6 +126,75 @@ async function getUploadDirectory(segments: string[]): Promise<
 function parseUploadFileNames(value: unknown): string[] | null {
   if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) return null;
   return value;
+}
+
+export async function PUT(
+  request: NextRequest,
+  { params }: { params: Promise<{ path: string[] }> }
+) {
+  if (!isApiRequestAllowed(request)) {
+    return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
+  }
+  if (!hasJsonContentType(request)) {
+    return NextResponse.json({ error: "Content-Type must be application/json" }, { status: 415 });
+  }
+
+  try {
+    const { path: segments } = await params;
+    const filePath = filePathFromSegments(segments);
+    const allowedRoots = await getAllowedFileRoots();
+
+    // Writes are stricter than reads: a session reference is not sufficient.
+    // The file itself must live under a browsable project root, both lexically
+    // and after resolving filesystem links.
+    if (
+      !isFilePathAllowed(filePath, allowedRoots)
+      || !isExistingFilePathAllowed(filePath, allowedRoots)
+    ) {
+      return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    }
+
+    const body = await request.json().catch(() => null) as {
+      content?: unknown;
+      expectedVersion?: unknown;
+    } | null;
+    if (!body || typeof body.content !== "string" || !isFileVersion(body.expectedVersion)) {
+      return NextResponse.json(
+        { error: "content and expectedVersion are required" },
+        { status: 400 },
+      );
+    }
+
+    const saved = writeTextFileIfVersionMatchesSync(
+      filePath,
+      body.content,
+      body.expectedVersion,
+    );
+    return NextResponse.json({
+      ...saved,
+      language: getLanguage(filePath),
+      size: saved.version.size,
+      editable: true,
+    });
+  } catch (error) {
+    if (error instanceof FileEditError) {
+      const status = error.code === "conflict"
+        ? 409
+        : error.code === "not_found"
+          ? 404
+          : error.code === "too_large"
+            ? 413
+            : 400;
+      return NextResponse.json(
+        { error: error.message, code: error.code, currentVersion: error.currentVersion },
+        { status },
+      );
+    }
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : String(error) },
+      { status: 500 },
+    );
+  }
 }
 
 export async function POST(
@@ -472,12 +546,22 @@ export async function GET(
       if (documentMime) {
         return streamFile(filePath, stat, documentMime, request.headers.get("range"));
       }
-      if (stat.size > TEXT_PREVIEW_MAX_BYTES) {
-        return NextResponse.json({ error: "File too large for preview (>256KB)" }, { status: 413 });
+      try {
+        const snapshot = readTextFileSnapshotSync(filePath, { allowSymbolicLink: true });
+        const language = getLanguage(filePath);
+        return NextResponse.json({
+          ...snapshot,
+          language,
+          size: snapshot.version.size,
+          editable: allowedByRoot && !fs.lstatSync(filePath).isSymbolicLink(),
+        });
+      } catch (error) {
+        if (error instanceof FileEditError) {
+          const status = error.code === "too_large" ? 413 : 400;
+          return NextResponse.json({ error: error.message, code: error.code }, { status });
+        }
+        throw error;
       }
-      const content = fs.readFileSync(filePath, "utf-8");
-      const language = getLanguage(filePath);
-      return NextResponse.json({ content, language, size: stat.size });
     }
 
     if (type === "download") {

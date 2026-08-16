@@ -86,6 +86,13 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab }: Props) {
             >
               {tab.label}
             </span>
+            {tab.viewerState?.edit?.dirty && (
+              <span
+                title={t("files.modified")}
+                aria-label={t("files.modified")}
+                style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--accent)", flexShrink: 0 }}
+              />
+            )}
             <button
               onClick={(e) => { e.stopPropagation(); onCloseTab(tab.id); }}
               onMouseEnter={() => setHoveredClose(tab.id)}

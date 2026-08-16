@@ -358,6 +358,17 @@ export function AppShell() {
   // Right panel — file tabs only
   const [fileTabs, setFileTabs] = useState<Tab[]>([]);
   const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
+  const hasDirtyFileTabs = fileTabs.some((tab) => tab.viewerState?.edit?.dirty);
+
+  useEffect(() => {
+    if (!hasDirtyFileTabs) return;
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    return () => window.removeEventListener("beforeunload", warnBeforeUnload);
+  }, [hasDirtyFileTabs]);
 
   const handleFileViewerStateChange = useCallback((
     tabId: string,
@@ -810,7 +821,32 @@ export function AppShell() {
     handleOpenFile(filePath, getFileName(filePath), { sourceSessionId: selectedSession?.id ?? null });
   }, [handleOpenFile, selectedSession?.id]);
 
+  const handleFileReverted = useCallback((previousPath: string, restoredPath: string | null) => {
+    if (restoredPath === previousPath) return;
+
+    const previousTabId = `file:${previousPath}`;
+    const previousTab = fileTabs.find((tab) => tab.id === previousTabId);
+    const remainingTabs = fileTabs.filter((tab) => tab.id !== previousTabId);
+    setFileTabs(remainingTabs);
+
+    if (restoredPath) {
+      handleOpenFile(restoredPath, getFileName(restoredPath), {
+        sourceSessionId: previousTab?.sourceSessionId ?? null,
+      });
+      return;
+    }
+
+    const nextActiveTabId = remainingTabs.at(-1)?.id ?? null;
+    setActiveFileTabId(nextActiveTabId);
+    if (!nextActiveTabId) setRightPanelOpen(false);
+  }, [fileTabs, handleOpenFile]);
+
   const handleCloseFileTab = useCallback((tabId: string) => {
+    const closingTab = fileTabs.find((tab) => tab.id === tabId);
+    if (closingTab?.viewerState?.edit?.dirty && !window.confirm(translate("files.closeDirtyConfirm"))) {
+      return;
+    }
+
     setFileTabs((prev) => {
       const next = prev.filter((t) => t.id !== tabId);
       if (next.length === 0) setRightPanelOpen(false);
@@ -821,7 +857,7 @@ export function AppShell() {
       const remaining = fileTabs.filter((t) => t.id !== tabId);
       return remaining.length > 0 ? remaining[remaining.length - 1].id : null;
     });
-  }, [fileTabs]);
+  }, [fileTabs, translate]);
 
   const handleViewFullHistory = useCallback(() => {
     if (!selectedSession) return;
@@ -2231,6 +2267,8 @@ export function AppShell() {
                 activeFileTab.viewerRevision ?? 0,
                 viewerState,
               )}
+              onSaved={() => setExplorerRefreshKey((key) => key + 1)}
+              onReverted={handleFileReverted}
               onMentionLines={rightPanelOpen ? handleFileLineMention : undefined}
               onAtMention={handleAtMention}
               onOpenFile={(filePath) => handleOpenFile(
