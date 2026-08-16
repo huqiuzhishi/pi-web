@@ -23,4 +23,16 @@ test("terminal uses xterm with raw input, PTY resizing, and reconnect replay", (
   assert.match(consoleSource, /action: "resize", cols, rows/);
   assert.match(consoleSource, /event\.type === "snapshot"/);
   assert.match(consoleSource, /fitAddonRef\.current\.fit\(\)/);
+  assert.match(consoleSource, /getComputedStyle\(terminalHostRef\.current\)/);
+  assert.match(consoleSource, /fontFamily: terminalStyles\.fontFamily/);
+  assert.match(consoleSource, /fontSize: Number\.parseFloat\(terminalStyles\.fontSize\)/);
+  assert.match(consoleSource, /fontFamily: "var\(--font-mono\)"[\s\S]*fontSize: 12/);
+});
+
+test("terminal uses a single-line divider with an overlaid touch resize target", () => {
+  assert.match(consoleSource, /borderTop: "1px solid var\(--border\)"/);
+  assert.match(consoleSource, /role="separator"[\s\S]*position: "absolute"[\s\S]*height: 24/);
+  assert.match(consoleSource, /touchAction: "none"/);
+  assert.match(consoleSource, /data-terminal-resize-handle="true"/);
+  assert.doesNotMatch(consoleSource, /<header/);
 });

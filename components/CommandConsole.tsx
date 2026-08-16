@@ -12,8 +12,6 @@ const INPUT_FLUSH_DELAY_MS = 8;
 const INPUT_RETRY_DELAY_MS = 100;
 const MAX_INPUT_CHARS_PER_REQUEST = 60_000;
 
-type ConnectionState = "idle" | "connecting" | "connected" | "error";
-
 function terminalTheme(): ITheme {
   const styles = getComputedStyle(document.documentElement);
   return {
@@ -79,10 +77,8 @@ interface Props {
   onClose: () => void;
 }
 
-export function CommandConsole({ cwd, open, onClose }: Props) {
+export function CommandConsole({ cwd, open }: Props) {
   const { t } = useI18n();
-  const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
-  const [alive, setAlive] = useState(false);
   const [terminalReady, setTerminalReady] = useState(false);
   const [panelHeight, setPanelHeight] = useState(() => {
     if (typeof window === "undefined") return DEFAULT_HEIGHT;
@@ -107,7 +103,6 @@ export function CommandConsole({ cwd, open, onClose }: Props) {
 
   const showTransportError = useCallback((message: string) => {
     canSendInputRef.current = false;
-    setConnectionState("error");
     terminalRef.current?.write(`\r\n\x1b[31m[terminal connection error] ${message}\x1b[0m\r\n`);
   }, []);
 
@@ -192,8 +187,6 @@ export function CommandConsole({ cwd, open, onClose }: Props) {
     sessionIdRef.current = null;
     sessionRootRef.current = null;
     creatingRef.current = false;
-    setAlive(false);
-    setConnectionState("idle");
     if (deleteRemote && id) {
       void fetch(`/api/terminal/${encodeURIComponent(id)}`, {
         method: "DELETE",
@@ -214,7 +207,6 @@ export function CommandConsole({ cwd, open, onClose }: Props) {
       }
       inputSequenceRef.current = Math.max(inputSequenceRef.current, event.nextInputSequence);
       canSendInputRef.current = snapshotAlive;
-      setAlive(snapshotAlive);
       terminal.options.disableStdin = !snapshotAlive;
       requestAnimationFrame(fitTerminal);
       return;
@@ -222,7 +214,6 @@ export function CommandConsole({ cwd, open, onClose }: Props) {
     const nextAlive = replayEvent(terminal, event);
     if (!nextAlive) {
       canSendInputRef.current = false;
-      setAlive(false);
       terminal.options.disableStdin = true;
     }
   }, [fitTerminal]);
@@ -231,9 +222,7 @@ export function CommandConsole({ cwd, open, onClose }: Props) {
     if (creatingRef.current || !terminalRef.current) return;
     creatingRef.current = true;
     const generation = ++generationRef.current;
-    setConnectionState("connecting");
     canSendInputRef.current = false;
-    setAlive(false);
     terminalRef.current.reset();
     terminalRef.current.options.disableStdin = true;
     fitTerminal();
@@ -260,9 +249,6 @@ export function CommandConsole({ cwd, open, onClose }: Props) {
       sessionRootRef.current = root;
       const source = new EventSource(`/api/terminal/${encodeURIComponent(data.id)}/events`);
       eventSourceRef.current = source;
-      source.onopen = () => {
-        if (generation === generationRef.current) setConnectionState("connected");
-      };
       source.onmessage = (message) => {
         if (generation !== generationRef.current) return;
         try {
@@ -270,9 +256,6 @@ export function CommandConsole({ cwd, open, onClose }: Props) {
         } catch {
           // Ignore malformed transport events and keep the terminal connected.
         }
-      };
-      source.onerror = () => {
-        if (generation === generationRef.current) setConnectionState("error");
       };
     } catch (error) {
       if (generation !== generationRef.current) return;
@@ -288,13 +271,14 @@ export function CommandConsole({ cwd, open, onClose }: Props) {
     const disposables: Array<{ dispose(): void }> = [];
     void Promise.all([import("@xterm/xterm"), import("@xterm/addon-fit")]).then(([xterm, fit]) => {
       if (disposed || !terminalHostRef.current) return;
+      const terminalStyles = getComputedStyle(terminalHostRef.current);
       terminal = new xterm.Terminal({
         allowProposedApi: false,
         cursorBlink: true,
         cursorStyle: "block",
         disableStdin: true,
-        fontFamily: "var(--font-mono)",
-        fontSize: 12,
+        fontFamily: terminalStyles.fontFamily,
+        fontSize: Number.parseFloat(terminalStyles.fontSize) || 12,
         lineHeight: 1.15,
         scrollback: 10_000,
         theme: terminalTheme(),
@@ -361,21 +345,6 @@ export function CommandConsole({ cwd, open, onClose }: Props) {
     return () => observer.disconnect();
   }, [terminalReady]);
 
-  const restart = () => {
-    if (!cwd) return;
-    closeTransport(true);
-    terminalRef.current?.reset();
-    void startConsole(cwd);
-  };
-
-  const clear = () => {
-    const terminal = terminalRef.current;
-    if (terminal) clearTerminal(terminal);
-    void postTerminalAction({ action: "clear" }).catch((error) => {
-      showTransportError(error instanceof Error ? error.message : String(error));
-    });
-  };
-
   const handleResizeStart = (event: PointerEvent<HTMLDivElement>) => {
     resizeRef.current = { startY: event.clientY, startHeight: panelHeight };
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -406,34 +375,27 @@ export function CommandConsole({ cwd, open, onClose }: Props) {
         flexDirection: "column",
         flex: `0 0 ${panelHeight}px`,
         minHeight: MIN_HEIGHT,
-        overflow: "hidden",
+        position: "relative",
+        overflow: "visible",
         borderTop: "1px solid var(--border)",
         background: "var(--bg)",
       }}
     >
       <div
+        data-terminal-resize-handle="true"
         role="separator"
         aria-label={t("terminal.resize")}
+        aria-orientation="horizontal"
         onPointerDown={handleResizeStart}
         onPointerMove={handleResizeMove}
         onPointerUp={handleResizeEnd}
         onPointerCancel={handleResizeEnd}
-        style={{ height: 5, flexShrink: 0, cursor: "row-resize", touchAction: "none", background: "transparent" }}
+        style={{ position: "absolute", zIndex: 2, top: -12, left: 0, right: 0, height: 24, cursor: "row-resize", touchAction: "none", userSelect: "none", background: "transparent" }}
       />
-      <header style={{ height: 31, display: "flex", alignItems: "center", gap: 8, flexShrink: 0, padding: "0 8px 0 12px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
-        <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text)" }}>{t("terminal.title")}</span>
-        <span title={cwd ?? ""} style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-dim)" }}>
-          {cwd}
-        </span>
-        <span title={connectionState} style={{ width: 7, height: 7, borderRadius: "50%", flexShrink: 0, background: connectionState === "connected" && alive ? "#22c55e" : connectionState === "connecting" ? "#eab308" : "#ef4444" }} />
-        <button type="button" onClick={clear} title={t("terminal.clear")} style={{ width: 24, height: 24, border: 0, borderRadius: 4, background: "none", color: "var(--text-muted)", cursor: "pointer" }}>⌫</button>
-        <button type="button" onClick={restart} title={t("terminal.restart")} style={{ width: 24, height: 24, border: 0, borderRadius: 4, background: "none", color: "var(--text-muted)", cursor: "pointer" }}>↻</button>
-        <button type="button" onClick={onClose} title={t("terminal.hide")} aria-label={t("terminal.hide")} style={{ width: 24, height: 24, border: 0, borderRadius: 4, background: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 16 }}>×</button>
-      </header>
       <div
         ref={terminalHostRef}
         onClick={() => terminalRef.current?.focus()}
-        style={{ flex: 1, minHeight: 0, overflow: "hidden", padding: "6px 8px", background: "var(--bg)" }}
+        style={{ flex: 1, minHeight: 0, overflow: "hidden", padding: "6px 8px", background: "var(--bg)", fontFamily: "var(--font-mono)", fontSize: 12 }}
       />
     </section>
   );
