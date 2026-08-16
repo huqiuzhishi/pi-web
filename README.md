@@ -1,4 +1,6 @@
-# Pi Web
+# agegr-pi-web-forked
+
+Local fork of [agegr/pi-web](https://github.com/agegr/pi-web), installed from this repository and exposed as `pi-web-whs` to avoid colliding with the upstream `pi-web` command.
 
 [中文文档](./README.zh-CN.md) | [日本語](./README.ja.md) | [Русский](./README.ru.md)
 
@@ -17,24 +19,18 @@ Local browser UI for the [pi coding agent](https://github.com/earendil-works/pi)
 
 ## Quick Start
 
-Pi Web requires Node.js 22.19.0 or newer. Check your version with `node --version`, then run:
+Pi Web requires Node.js 22.19.0 or newer. From this directory:
 
 ```bash
-npx @agegr/pi-web@latest
+npm install
+npm run build
+npm link
+pi-web-whs
 ```
 
 The CLI opens a browser after the server is ready. If it does not, open [http://127.0.0.1:30141](http://127.0.0.1:30141). Pi Web listens only on `127.0.0.1` by default.
 
 If no model provider is configured yet, open the **Models** panel to sign in or add an API key.
-
-To install the `pi-web` command globally:
-
-```bash
-npm install -g @agegr/pi-web@latest
-pi-web
-```
-
-To update, stop the running process with `Ctrl+C` and run the same install command again. To uninstall, run `npm uninstall -g @agegr/pi-web`.
 
 ## Configuration
 
@@ -51,7 +47,7 @@ For port and hostname, command-line options override the corresponding environme
 For example:
 
 ```bash
-pi-web -p 8080 -H 0.0.0.0 --no-open
+pi-web-whs -p 8080 -H 0.0.0.0 --no-open
 ```
 
 ### Remote Access
@@ -59,7 +55,7 @@ pi-web -p 8080 -H 0.0.0.0 --no-open
 Binding to a non-loopback address exposes an agent that can execute high-privilege actions. On a trusted LAN, require a long random password:
 
 ```bash
-PI_WEB_PASSWORD='a-long-random-password' pi-web --hostname 0.0.0.0
+PI_WEB_PASSWORD='a-long-random-password' pi-web-whs --hostname 0.0.0.0
 ```
 
 Basic Auth does not encrypt the password in transit. Do not expose Pi Web over plain HTTP to the internet; use HTTPS through a trusted reverse proxy or a trusted VPN. If a reverse proxy sends an external hostname, add that exact name to `PI_WEB_ALLOWED_HOSTS`. This allow-list does not change the address Pi Web binds to.

@@ -121,6 +121,7 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: "cwd must be an absolute path" }, { status: 400 });
     }
     const query = req.nextUrl.searchParams.get("q")?.slice(0, MAX_QUERY_LENGTH) ?? "";
+    const filesOnly = req.nextUrl.searchParams.get("filesOnly") === "1";
 
     const allowedRoots = await getAllowedFileRoots();
     if (!isFilePathAllowed(cwd, allowedRoots)) {
@@ -155,7 +156,10 @@ export async function GET(req: NextRequest) {
 
     if (query) {
       cached.entries ??= buildEntriesFromFiles(cached.listing.files);
-      return NextResponse.json({ matches: filterFileEntries(cached.entries, query) });
+      const entries = filesOnly
+        ? cached.entries.filter((entry) => !entry.isDir)
+        : cached.entries;
+      return NextResponse.json({ matches: filterFileEntries(entries, query) });
     }
 
     const { files, hardTruncated } = cached.listing;

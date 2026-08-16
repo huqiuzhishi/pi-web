@@ -11,6 +11,7 @@ import {
   normalizeFilePathSlashes,
 } from "@/lib/file-paths";
 import type { GitFileStatus, GitFileStatusKind, GitStatusResponse } from "@/lib/git-types";
+import type { FileIndexEntry } from "@/lib/file-fuzzy";
 import { useI18n } from "@/hooks/useI18n";
 type Translate = ReturnType<typeof useI18n>["t"];
 
@@ -514,6 +515,55 @@ function ChangeRow({
   );
 }
 
+function SearchResultRow({
+  result,
+  selected,
+  onOpen,
+}: {
+  result: FileIndexEntry;
+  selected: boolean;
+  onOpen: () => void;
+}) {
+  const name = getFileName(result.path);
+  return (
+    <button
+      type="button"
+      role="option"
+      aria-selected={selected}
+      onClick={onOpen}
+      title={result.path}
+      style={{
+        width: "100%",
+        height: 30,
+        padding: "0 8px",
+        display: "flex",
+        alignItems: "center",
+        gap: 7,
+        border: "none",
+        borderRadius: 4,
+        background: selected ? "var(--bg-selected)" : "transparent",
+        color: "var(--text)",
+        cursor: "pointer",
+        textAlign: "left",
+      }}
+    >
+      <span style={{ flexShrink: 0, display: "flex", alignItems: "center" }}>
+        {getFileIcon(name, 14)}
+      </span>
+      <span style={{ minWidth: 0, flex: 1 }}>
+        <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12 }}>
+          {name}
+        </span>
+        {result.path !== name && (
+          <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)", fontSize: 10 }}>
+            {getFileDirectory(result.path)}
+          </span>
+        )}
+      </span>
+    </button>
+  );
+}
+
 export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileExplorer({
   cwd,
   onOpenFile,
@@ -538,10 +588,17 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadSummary, setUploadSummary] = useState<UploadSummary | null>(null);
   const [pendingConflict, setPendingConflict] = useState<PendingConflict | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<FileIndexEntry[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [selectedSearchIndex, setSelectedSearchIndex] = useState(0);
   const prevCwdRef = useRef<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const refreshToken = `${refreshKey ?? 0}:${treeRefreshKey}`;
   const uploadBusy = uploadPhase !== "idle";
+  const normalizedSearchQuery = searchQuery.trim();
+  const searchActive = normalizedSearchQuery.length > 0;
 
   const gitStatusByPath = useMemo(() => new Map(
     gitFiles.map((status) => [normalizeFilePathSlashes(status.filePath), status]),
@@ -681,6 +738,10 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       setUploadSummary(null);
       setPendingConflict(null);
       setUploadError(null);
+      setSearchQuery("");
+      setSearchResults([]);
+      setSearchError(null);
+      setSelectedSearchIndex(0);
     }
 
     setLoading(cwdChanged);
@@ -692,6 +753,43 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [cwd, refreshKey, treeRefreshKey]);
+
+  useEffect(() => {
+    if (!normalizedSearchQuery) {
+      setSearchResults([]);
+      setSearchLoading(false);
+      setSearchError(null);
+      setSelectedSearchIndex(0);
+      return;
+    }
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => {
+      setSearchLoading(true);
+      setSearchError(null);
+      const params = new URLSearchParams({ cwd, q: normalizedSearchQuery, filesOnly: "1" });
+      void fetch(`/api/file-index?${params.toString()}`, { signal: controller.signal })
+        .then(async (response) => {
+          const data = await response.json() as { matches?: FileIndexEntry[]; error?: string };
+          if (!response.ok) throw new Error(data.error ?? `Search failed (HTTP ${response.status})`);
+          setSearchResults(data.matches ?? []);
+          setSelectedSearchIndex(0);
+        })
+        .catch((searchFailure) => {
+          if (searchFailure instanceof DOMException && searchFailure.name === "AbortError") return;
+          setSearchResults([]);
+          setSearchError(searchFailure instanceof Error ? searchFailure.message : String(searchFailure));
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setSearchLoading(false);
+        });
+    }, 150);
+
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [cwd, normalizedSearchQuery, refreshKey, treeRefreshKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -725,6 +823,30 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       uploadSummary.uploaded.map((name) => getRelativeFilePath(joinFilePath(cwd, name), cwd)),
     );
   }, [cwd, onAtMentions, uploadSummary]);
+
+  const openSearchResult = useCallback((result: FileIndexEntry) => {
+    const fullPath = joinFilePath(cwd, result.path);
+    onOpenFile(fullPath, getFileName(result.path));
+  }, [cwd, onOpenFile]);
+
+  const handleSearchKeyDown = useCallback((event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setSearchQuery("");
+      return;
+    }
+    if (searchResults.length === 0) return;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setSelectedSearchIndex((index) => (index + 1) % searchResults.length);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setSelectedSearchIndex((index) => (index - 1 + searchResults.length) % searchResults.length);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      openSearchResult(searchResults[selectedSearchIndex] ?? searchResults[0]);
+    }
+  }, [openSearchResult, searchResults, selectedSearchIndex]);
 
   return (
     <div style={{ minHeight: "100%" }}>
@@ -847,7 +969,69 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
         </div>
       )}
 
-      {!changesCollapsed && gitFiles.length > 0 && (
+      <div style={{ position: "sticky", top: 0, zIndex: 2, padding: "6px 8px", background: "var(--bg-panel)", borderBottom: "1px solid var(--border)" }}>
+        <div style={{ position: "relative", display: "flex", alignItems: "center" }}>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="2" strokeLinecap="round" aria-hidden="true" style={{ position: "absolute", left: 8, pointerEvents: "none" }}>
+            <circle cx="11" cy="11" r="7" />
+            <path d="m20 20-4-4" />
+          </svg>
+          <input
+            type="search"
+            value={searchQuery}
+            onChange={(event) => {
+              const nextQuery = event.target.value;
+              setSearchQuery(nextQuery);
+              setSearchResults([]);
+              setSearchLoading(nextQuery.trim().length > 0);
+              setSearchError(null);
+              setSelectedSearchIndex(0);
+            }}
+            onKeyDown={handleSearchKeyDown}
+            placeholder={t("files.searchPlaceholder")}
+            aria-label={t("files.searchLabel")}
+            autoComplete="off"
+            spellCheck={false}
+            style={{ width: "100%", height: 28, padding: searchQuery ? "0 30px 0 28px" : "0 8px 0 28px", border: "1px solid var(--border)", borderRadius: 5, outline: "none", background: "var(--bg)", color: "var(--text)", fontSize: 12 }}
+          />
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => setSearchQuery("")}
+              title={t("files.clearSearch")}
+              aria-label={t("files.clearSearch")}
+              style={{ position: "absolute", right: 3, width: 24, height: 24, padding: 0, display: "flex", alignItems: "center", justifyContent: "center", border: "none", borderRadius: 4, background: "transparent", color: "var(--text-dim)", cursor: "pointer" }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true">
+                <path d="m6 6 12 12" />
+                <path d="m18 6-12 12" />
+              </svg>
+            </button>
+          )}
+        </div>
+      </div>
+
+      {searchActive && (
+        <div role="listbox" aria-label={t("files.searchResults")} style={{ padding: "4px" }}>
+          {searchLoading ? (
+            <div role="status" style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-dim)" }}>{t("files.searching")}</div>
+          ) : searchError ? (
+            <div role="alert" style={{ padding: "8px 12px", fontSize: 11, color: "#f87171", overflowWrap: "anywhere" }}>{searchError}</div>
+          ) : searchResults.length === 0 ? (
+            <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-dim)" }}>{t("files.noSearchResults")}</div>
+          ) : (
+            searchResults.map((result, index) => (
+              <SearchResultRow
+                key={result.path}
+                result={result}
+                selected={index === selectedSearchIndex}
+                onOpen={() => openSearchResult(result)}
+              />
+            ))
+          )}
+        </div>
+      )}
+
+      {!searchActive && !changesCollapsed && gitFiles.length > 0 && (
         <div style={{ padding: "0 4px 2px" }}>
           <div
             aria-label={t("files.changeStats", {
@@ -869,7 +1053,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
         </div>
       )}
 
-      {(changesCollapsed || gitFiles.length === 0) && (
+      {!searchActive && (changesCollapsed || gitFiles.length === 0) && (
         <div style={{ padding: "2px 4px" }}>
           {loading ? (
             <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-dim)" }}>Loading files...</div>

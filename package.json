@@ -1,21 +1,22 @@
 {
-  "name": "@agegr/pi-web",
+  "name": "agegr-pi-web-forked",
   "version": "0.8.9",
-  "description": "Web UI for the pi coding agent",
-  "homepage": "https://github.com/agegr/pi-web#readme",
+  "private": true,
+  "description": "Local fork of the Pi coding agent web UI",
+  "homepage": "https://github.com/huqiuzhishi/pi-web#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/agegr/pi-web.git"
+    "url": "git+https://github.com/huqiuzhishi/pi-web.git"
   },
   "bugs": {
-    "url": "https://github.com/agegr/pi-web/issues"
+    "url": "https://github.com/huqiuzhishi/pi-web/issues"
   },
   "license": "MIT",
   "engines": {
     "node": ">=22.19.0"
   },
   "bin": {
-    "pi-web": "bin/pi-web.js"
+    "pi-web-whs": "bin/pi-web-whs.js"
   },
   "files": [
     "bin",
