@@ -9,16 +9,22 @@ import {
 } from "@/lib/file-access";
 import { hasJsonContentType } from "@/lib/request-security";
 
-// POST /api/terminal  body: { cwd: string }
+// POST /api/terminal  body: { cwd: string, cols?: number, rows?: number }
 export async function POST(request: Request) {
   try {
     if (!hasJsonContentType(request)) {
       return NextResponse.json({ error: "Content-Type must be application/json" }, { status: 415 });
     }
-    const body = await request.json() as { cwd?: unknown };
+    const body = await request.json() as { cwd?: unknown; cols?: unknown; rows?: unknown };
     const cwdValue = typeof body.cwd === "string" ? body.cwd.trim() : "";
     if (!cwdValue || !path.isAbsolute(cwdValue)) {
       return NextResponse.json({ error: "cwd must be an absolute path" }, { status: 400 });
+    }
+    if (body.cols !== undefined && typeof body.cols !== "number") {
+      return NextResponse.json({ error: "cols must be a number" }, { status: 400 });
+    }
+    if (body.rows !== undefined && typeof body.rows !== "number") {
+      return NextResponse.json({ error: "rows must be a number" }, { status: 400 });
     }
 
     const cwd = path.resolve(cwdValue);
@@ -31,8 +37,11 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Working directory not found" }, { status: 404 });
     }
 
-    const session = await createCommandConsoleSession(cwd);
-    return NextResponse.json({ id: session.id, cwd: session.cwd });
+    const session = await createCommandConsoleSession(cwd, {
+      cols: body.cols as number | undefined,
+      rows: body.rows as number | undefined,
+    });
+    return NextResponse.json({ id: session.id, cwd: session.initialCwd, ...session.dimensions });
   } catch (error) {
     return NextResponse.json({
       error: error instanceof Error ? error.message : String(error),

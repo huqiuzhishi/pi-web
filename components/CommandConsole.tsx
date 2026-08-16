@@ -1,70 +1,75 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
+import type { FitAddon } from "@xterm/addon-fit";
+import type { ITheme, Terminal } from "@xterm/xterm";
 import type { CommandConsoleEvent, CommandConsoleWireEvent } from "@/lib/command-console";
-import { stripAnsi } from "@/lib/ansi";
 import { useI18n } from "@/hooks/useI18n";
 
-const MAX_TRANSCRIPT_LENGTH = 1_000_000;
 const DEFAULT_HEIGHT = 260;
 const MIN_HEIGHT = 140;
+const INPUT_FLUSH_DELAY_MS = 8;
+const INPUT_RETRY_DELAY_MS = 100;
+const MAX_INPUT_CHARS_PER_REQUEST = 60_000;
 
-type ConsoleViewState = {
-  transcript: string;
-  cwd: string;
-  busy: boolean;
-  alive: boolean;
-};
+type ConnectionState = "idle" | "connecting" | "connected" | "error";
 
-function appendTranscript(current: string, text: string): string {
-  const next = current + text;
-  if (next.length <= MAX_TRANSCRIPT_LENGTH) return next;
-  return `[earlier output truncated]\n${next.slice(next.length - MAX_TRANSCRIPT_LENGTH)}`;
+function terminalTheme(): ITheme {
+  const styles = getComputedStyle(document.documentElement);
+  return {
+    background: styles.getPropertyValue("--bg").trim(),
+    foreground: styles.getPropertyValue("--text").trim(),
+    cursor: styles.getPropertyValue("--text").trim(),
+    cursorAccent: styles.getPropertyValue("--bg").trim(),
+    selectionBackground: styles.getPropertyValue("--bg-selected").trim(),
+    black: "#111827",
+    red: "#ef4444",
+    green: "#22c55e",
+    yellow: "#eab308",
+    blue: "#3b82f6",
+    magenta: "#a855f7",
+    cyan: "#06b6d4",
+    white: "#d1d5db",
+    brightBlack: "#6b7280",
+    brightRed: "#f87171",
+    brightGreen: "#4ade80",
+    brightYellow: "#facc15",
+    brightBlue: "#60a5fa",
+    brightMagenta: "#c084fc",
+    brightCyan: "#22d3ee",
+    brightWhite: "#f9fafb",
+  };
 }
 
-function ensureLineBreak(value: string): string {
-  return !value || value.endsWith("\n") ? value : `${value}\n`;
+function clearTerminal(terminal: Terminal): void {
+  terminal.clear();
+  terminal.write("\x1b[2J\x1b[H");
 }
 
-export function applyCommandConsoleEvent(
-  state: ConsoleViewState,
-  event: CommandConsoleEvent,
-): ConsoleViewState {
+function splitTerminalInput(data: string): string[] {
+  const chunks: string[] = [];
+  for (let start = 0; start < data.length;) {
+    let end = Math.min(data.length, start + MAX_INPUT_CHARS_PER_REQUEST);
+    if (end < data.length && /[\uD800-\uDBFF]/.test(data[end - 1])) end -= 1;
+    chunks.push(data.slice(start, end));
+    start = end;
+  }
+  return chunks;
+}
+
+function replayEvent(terminal: Terminal, event: CommandConsoleEvent): boolean {
   switch (event.type) {
-    case "ready":
-      return { ...state, cwd: event.cwd, alive: true };
     case "output":
-      return { ...state, transcript: appendTranscript(state.transcript, event.data) };
-    case "command_start": {
-      const beforePrompt = ensureLineBreak(state.transcript);
-      return {
-        ...state,
-        cwd: event.cwd,
-        busy: true,
-        transcript: appendTranscript(beforePrompt, `${event.cwd} $ ${event.command}\n`),
-      };
-    }
-    case "command_end": {
-      let transcript = ensureLineBreak(state.transcript);
-      if (event.status !== 0) transcript = appendTranscript(transcript, `[exit ${event.status}]\n`);
-      return { ...state, transcript, cwd: event.cwd, busy: false };
-    }
+      terminal.write(event.data);
+      return true;
     case "clear":
-      return { ...state, transcript: "" };
-    case "error":
-      return {
-        ...state,
-        transcript: appendTranscript(ensureLineBreak(state.transcript), `[error] ${event.message}\n`),
-      };
-    case "exit": {
-      const reason = event.signal ? `signal ${event.signal}` : `exit ${event.code ?? "unknown"}`;
-      return {
-        ...state,
-        alive: false,
-        busy: false,
-        transcript: appendTranscript(ensureLineBreak(state.transcript), `[console closed: ${reason}]\n`),
-      };
-    }
+      clearTerminal(terminal);
+      return true;
+    case "exit":
+      terminal.write(`\r\n[terminal exited: ${event.exitCode}${event.signal === undefined ? "" : `, signal ${event.signal}`}]\r\n`);
+      return false;
+    case "ready":
+      return true;
   }
 }
 
@@ -76,39 +81,118 @@ interface Props {
 
 export function CommandConsole({ cwd, open, onClose }: Props) {
   const { t } = useI18n();
-  const [view, setView] = useState<ConsoleViewState>({
-    transcript: "",
-    cwd: cwd ?? "",
-    busy: false,
-    alive: false,
-  });
-  const [input, setInput] = useState("");
-  const [history, setHistory] = useState<string[]>([]);
-  const [historyIndex, setHistoryIndex] = useState(-1);
-  const [connectionState, setConnectionState] = useState<"idle" | "connecting" | "connected" | "error">("idle");
+  const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
+  const [alive, setAlive] = useState(false);
+  const [terminalReady, setTerminalReady] = useState(false);
   const [panelHeight, setPanelHeight] = useState(() => {
     if (typeof window === "undefined") return DEFAULT_HEIGHT;
     const stored = Number(window.localStorage.getItem("pi-command-console-height"));
     return Number.isFinite(stored) && stored >= MIN_HEIGHT ? stored : DEFAULT_HEIGHT;
   });
-  const outputRef = useRef<HTMLPreElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const terminalHostRef = useRef<HTMLDivElement>(null);
+  const terminalRef = useRef<Terminal | null>(null);
+  const fitAddonRef = useRef<FitAddon | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const sessionRootRef = useRef<string | null>(null);
   const generationRef = useRef(0);
   const creatingRef = useRef(false);
+  const inputSequenceRef = useRef(1);
+  const canSendInputRef = useRef(false);
+  const inputBufferRef = useRef("");
+  const inputFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inputSendChainRef = useRef<Promise<void>>(Promise.resolve());
   const panelHeightRef = useRef(panelHeight);
   const resizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
+
+  const showTransportError = useCallback((message: string) => {
+    canSendInputRef.current = false;
+    setConnectionState("error");
+    terminalRef.current?.write(`\r\n\x1b[31m[terminal connection error] ${message}\x1b[0m\r\n`);
+  }, []);
+
+  const postTerminalAction = useCallback(async (
+    body: Record<string, unknown>,
+    retry = false,
+    targetId?: string,
+  ) => {
+    const id = targetId ?? sessionIdRef.current;
+    if (!id) throw new Error("Terminal is not connected");
+    const send = () => fetch(`/api/terminal/${encodeURIComponent(id)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    let response: Response;
+    try {
+      response = await send();
+    } catch (error) {
+      if (!retry) throw error;
+      await new Promise((resolve) => setTimeout(resolve, INPUT_RETRY_DELAY_MS));
+      response = await send();
+    }
+    const data = await response.json().catch(() => ({})) as { error?: string };
+    if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
+  }, []);
+
+  const flushInput = useCallback(() => {
+    inputFlushTimerRef.current = null;
+    const data = inputBufferRef.current;
+    inputBufferRef.current = "";
+    const targetId = sessionIdRef.current;
+    if (!data || !targetId) return;
+    const generation = generationRef.current;
+    const inputs = splitTerminalInput(data).map((chunk) => ({
+      data: chunk,
+      sequence: inputSequenceRef.current++,
+    }));
+    inputSendChainRef.current = inputSendChainRef.current
+      .then(async () => {
+        if (generation !== generationRef.current || !canSendInputRef.current) return;
+        for (const input of inputs) {
+          await postTerminalAction({ action: "input", ...input }, true, targetId);
+        }
+      })
+      .catch((error) => {
+        if (generation === generationRef.current) {
+          showTransportError(error instanceof Error ? error.message : String(error));
+        }
+      });
+  }, [postTerminalAction, showTransportError]);
+
+  const queueInput = useCallback((data: string) => {
+    if (!data || !canSendInputRef.current) return;
+    inputBufferRef.current += data;
+    if (inputFlushTimerRef.current === null) {
+      inputFlushTimerRef.current = setTimeout(flushInput, INPUT_FLUSH_DELAY_MS);
+    }
+  }, [flushInput]);
+
+  const fitTerminal = useCallback(() => {
+    if (!open || !terminalRef.current || !fitAddonRef.current || !terminalHostRef.current) return;
+    if (terminalHostRef.current.clientWidth === 0 || terminalHostRef.current.clientHeight === 0) return;
+    try {
+      fitAddonRef.current.fit();
+    } catch {
+      // The panel can become hidden between measuring and fitting.
+    }
+  }, [open]);
 
   const closeTransport = useCallback((deleteRemote: boolean) => {
     generationRef.current += 1;
     eventSourceRef.current?.close();
     eventSourceRef.current = null;
+    if (inputFlushTimerRef.current !== null) clearTimeout(inputFlushTimerRef.current);
+    inputFlushTimerRef.current = null;
+    inputBufferRef.current = "";
+    inputSendChainRef.current = Promise.resolve();
+    inputSequenceRef.current = 1;
+    canSendInputRef.current = false;
     const id = sessionIdRef.current;
     sessionIdRef.current = null;
     sessionRootRef.current = null;
     creatingRef.current = false;
+    setAlive(false);
     setConnectionState("idle");
     if (deleteRemote && id) {
       void fetch(`/api/terminal/${encodeURIComponent(id)}`, {
@@ -119,35 +203,49 @@ export function CommandConsole({ cwd, open, onClose }: Props) {
   }, []);
 
   const handleWireEvent = useCallback((event: CommandConsoleWireEvent) => {
+    const terminal = terminalRef.current;
+    if (!terminal) return;
     if (event.type === "snapshot") {
-      let next: ConsoleViewState = {
-        transcript: "",
-        cwd: event.cwd,
-        busy: false,
-        alive: event.alive,
-      };
+      terminal.reset();
+      terminal.options.theme = terminalTheme();
+      let snapshotAlive = event.alive;
       for (const historicalEvent of event.events) {
-        next = applyCommandConsoleEvent(next, historicalEvent);
+        snapshotAlive = replayEvent(terminal, historicalEvent) && snapshotAlive;
       }
-      next.busy = event.busy;
-      next.alive = event.alive;
-      setView(next);
+      inputSequenceRef.current = Math.max(inputSequenceRef.current, event.nextInputSequence);
+      canSendInputRef.current = snapshotAlive;
+      setAlive(snapshotAlive);
+      terminal.options.disableStdin = !snapshotAlive;
+      requestAnimationFrame(fitTerminal);
       return;
     }
-    setView((current) => applyCommandConsoleEvent(current, event));
-  }, []);
+    const nextAlive = replayEvent(terminal, event);
+    if (!nextAlive) {
+      canSendInputRef.current = false;
+      setAlive(false);
+      terminal.options.disableStdin = true;
+    }
+  }, [fitTerminal]);
 
   const startConsole = useCallback(async (root: string) => {
-    if (creatingRef.current) return;
+    if (creatingRef.current || !terminalRef.current) return;
     creatingRef.current = true;
     const generation = ++generationRef.current;
     setConnectionState("connecting");
-    setView({ transcript: "", cwd: root, busy: false, alive: false });
+    canSendInputRef.current = false;
+    setAlive(false);
+    terminalRef.current.reset();
+    terminalRef.current.options.disableStdin = true;
+    fitTerminal();
+    const dimensions = {
+      cols: terminalRef.current.cols,
+      rows: terminalRef.current.rows,
+    };
     try {
       const response = await fetch("/api/terminal", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd: root }),
+        body: JSON.stringify({ cwd: root, ...dimensions }),
       });
       const data = await response.json() as { id?: string; cwd?: string; error?: string };
       if (!response.ok || !data.id || !data.cwd) {
@@ -160,122 +258,122 @@ export function CommandConsole({ cwd, open, onClose }: Props) {
 
       sessionIdRef.current = data.id;
       sessionRootRef.current = root;
-      setView((current) => ({ ...current, cwd: data.cwd!, alive: true }));
       const source = new EventSource(`/api/terminal/${encodeURIComponent(data.id)}/events`);
       eventSourceRef.current = source;
-      source.onopen = () => setConnectionState("connected");
+      source.onopen = () => {
+        if (generation === generationRef.current) setConnectionState("connected");
+      };
       source.onmessage = (message) => {
+        if (generation !== generationRef.current) return;
         try {
           handleWireEvent(JSON.parse(message.data) as CommandConsoleWireEvent);
         } catch {
-          // Ignore malformed transport events and keep the console connected.
+          // Ignore malformed transport events and keep the terminal connected.
         }
       };
-      source.onerror = () => setConnectionState("error");
+      source.onerror = () => {
+        if (generation === generationRef.current) setConnectionState("error");
+      };
     } catch (error) {
       if (generation !== generationRef.current) return;
-      setConnectionState("error");
-      setView((current) => applyCommandConsoleEvent(current, {
-        type: "error",
-        message: error instanceof Error ? error.message : String(error),
-      }));
+      showTransportError(error instanceof Error ? error.message : String(error));
     } finally {
       if (generation === generationRef.current) creatingRef.current = false;
     }
-  }, [handleWireEvent]);
+  }, [fitTerminal, handleWireEvent, showTransportError]);
+
+  useEffect(() => {
+    let disposed = false;
+    let terminal: Terminal | null = null;
+    const disposables: Array<{ dispose(): void }> = [];
+    void Promise.all([import("@xterm/xterm"), import("@xterm/addon-fit")]).then(([xterm, fit]) => {
+      if (disposed || !terminalHostRef.current) return;
+      terminal = new xterm.Terminal({
+        allowProposedApi: false,
+        cursorBlink: true,
+        cursorStyle: "block",
+        disableStdin: true,
+        fontFamily: "var(--font-mono)",
+        fontSize: 12,
+        lineHeight: 1.15,
+        scrollback: 10_000,
+        theme: terminalTheme(),
+      });
+      const fitAddon = new fit.FitAddon();
+      terminal.loadAddon(fitAddon);
+      terminal.open(terminalHostRef.current);
+      terminalRef.current = terminal;
+      fitAddonRef.current = fitAddon;
+      disposables.push(terminal.onData(queueInput));
+      disposables.push(terminal.onBinary(queueInput));
+      disposables.push(terminal.onResize(({ cols, rows }) => {
+        if (!sessionIdRef.current) return;
+        void postTerminalAction({ action: "resize", cols, rows }).catch(() => {});
+      }));
+      setTerminalReady(true);
+    }).catch((error) => {
+      if (!disposed) showTransportError(error instanceof Error ? error.message : String(error));
+    });
+    return () => {
+      disposed = true;
+      setTerminalReady(false);
+      for (const disposable of disposables) disposable.dispose();
+      terminal?.dispose();
+      terminalRef.current = null;
+      fitAddonRef.current = null;
+    };
+  }, [postTerminalAction, queueInput, showTransportError]);
 
   useEffect(() => {
     if (sessionIdRef.current && sessionRootRef.current !== cwd) {
       closeTransport(true);
-      setView({ transcript: "", cwd: cwd ?? "", busy: false, alive: false });
+      terminalRef.current?.reset();
     }
-    if (open && cwd && !sessionIdRef.current && !creatingRef.current) {
+    if (open && cwd && terminalReady && !sessionIdRef.current && !creatingRef.current) {
       void startConsole(cwd);
     }
-  }, [closeTransport, cwd, open, startConsole]);
+  }, [closeTransport, cwd, open, startConsole, terminalReady]);
 
   useEffect(() => () => closeTransport(true), [closeTransport]);
 
   useEffect(() => {
-    if (!open) return;
-    const output = outputRef.current;
-    if (output) output.scrollTop = output.scrollHeight;
-  }, [open, view.transcript]);
+    const host = terminalHostRef.current;
+    if (!host || !terminalReady) return;
+    const observer = new ResizeObserver(() => requestAnimationFrame(fitTerminal));
+    observer.observe(host);
+    return () => observer.disconnect();
+  }, [fitTerminal, terminalReady]);
 
   useEffect(() => {
-    if (open && !view.busy) inputRef.current?.focus();
-  }, [open, view.busy]);
-
-  const sendAction = useCallback(async (action: "command" | "interrupt" | "clear", command?: string) => {
-    const id = sessionIdRef.current;
-    if (!id) throw new Error("Command console is not connected");
-    const response = await fetch(`/api/terminal/${encodeURIComponent(id)}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action, ...(command === undefined ? {} : { command }) }),
+    if (!open || !terminalReady) return;
+    requestAnimationFrame(() => {
+      fitTerminal();
+      terminalRef.current?.focus();
     });
-    const data = await response.json().catch(() => ({})) as { error?: string };
-    if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
-  }, []);
+  }, [fitTerminal, open, panelHeight, terminalReady]);
 
-  const submit = useCallback(async () => {
-    const command = input.trimEnd();
-    if (!command.trim() || view.busy || !view.alive) return;
-    setInput("");
-    setHistory((current) => current[current.length - 1] === command ? current : [...current, command]);
-    setHistoryIndex(-1);
-    setView((current) => ({ ...current, busy: true }));
-    try {
-      await sendAction("command", command);
-    } catch (error) {
-      setView((current) => applyCommandConsoleEvent({ ...current, busy: false }, {
-        type: "error",
-        message: error instanceof Error ? error.message : String(error),
-      }));
-    }
-  }, [input, sendAction, view.alive, view.busy]);
-
-  const handleInputKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      void submit();
-      return;
-    }
-    if (event.key === "c" && event.ctrlKey && view.busy) {
-      event.preventDefault();
-      void sendAction("interrupt").catch(() => {});
-      return;
-    }
-    if (event.key === "l" && event.ctrlKey) {
-      event.preventDefault();
-      void sendAction("clear").catch(() => setView((current) => ({ ...current, transcript: "" })));
-      return;
-    }
-    if (event.key === "ArrowUp" && !event.shiftKey && input.indexOf("\n") < 0 && history.length > 0) {
-      event.preventDefault();
-      const nextIndex = historyIndex < 0 ? history.length - 1 : Math.max(0, historyIndex - 1);
-      setHistoryIndex(nextIndex);
-      setInput(history[nextIndex]);
-      return;
-    }
-    if (event.key === "ArrowDown" && !event.shiftKey && historyIndex >= 0) {
-      event.preventDefault();
-      const nextIndex = historyIndex + 1;
-      if (nextIndex >= history.length) {
-        setHistoryIndex(-1);
-        setInput("");
-      } else {
-        setHistoryIndex(nextIndex);
-        setInput(history[nextIndex]);
-      }
-    }
-  };
+  useEffect(() => {
+    if (!terminalReady) return;
+    const observer = new MutationObserver(() => {
+      if (terminalRef.current) terminalRef.current.options.theme = terminalTheme();
+    });
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+    return () => observer.disconnect();
+  }, [terminalReady]);
 
   const restart = () => {
     if (!cwd) return;
     closeTransport(true);
-    setView({ transcript: "", cwd, busy: false, alive: false });
+    terminalRef.current?.reset();
     void startConsole(cwd);
+  };
+
+  const clear = () => {
+    const terminal = terminalRef.current;
+    if (terminal) clearTerminal(terminal);
+    void postTerminalAction({ action: "clear" }).catch((error) => {
+      showTransportError(error instanceof Error ? error.message : String(error));
+    });
   };
 
   const handleResizeStart = (event: PointerEvent<HTMLDivElement>) => {
@@ -324,43 +422,19 @@ export function CommandConsole({ cwd, open, onClose }: Props) {
       />
       <header style={{ height: 31, display: "flex", alignItems: "center", gap: 8, flexShrink: 0, padding: "0 8px 0 12px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
         <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text)" }}>{t("terminal.title")}</span>
-        <span title={view.cwd} style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-dim)" }}>
-          {view.cwd}
+        <span title={cwd ?? ""} style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-dim)" }}>
+          {cwd}
         </span>
-        <span title={connectionState} style={{ width: 7, height: 7, borderRadius: "50%", flexShrink: 0, background: connectionState === "connected" && view.alive ? "#22c55e" : connectionState === "connecting" ? "#eab308" : "#ef4444" }} />
-        {view.busy && (
-          <button type="button" onClick={() => void sendAction("interrupt").catch(() => {})} title={t("terminal.interrupt")} style={{ height: 23, padding: "0 7px", border: "1px solid var(--border)", borderRadius: 4, background: "none", color: "#ef4444", cursor: "pointer", fontSize: 10 }}>
-            {t("terminal.stop")}
-          </button>
-        )}
-        <button type="button" onClick={() => void sendAction("clear").catch(() => setView((current) => ({ ...current, transcript: "" })))} title={t("terminal.clear")} style={{ width: 24, height: 24, border: 0, borderRadius: 4, background: "none", color: "var(--text-muted)", cursor: "pointer" }}>⌫</button>
+        <span title={connectionState} style={{ width: 7, height: 7, borderRadius: "50%", flexShrink: 0, background: connectionState === "connected" && alive ? "#22c55e" : connectionState === "connecting" ? "#eab308" : "#ef4444" }} />
+        <button type="button" onClick={clear} title={t("terminal.clear")} style={{ width: 24, height: 24, border: 0, borderRadius: 4, background: "none", color: "var(--text-muted)", cursor: "pointer" }}>⌫</button>
         <button type="button" onClick={restart} title={t("terminal.restart")} style={{ width: 24, height: 24, border: 0, borderRadius: 4, background: "none", color: "var(--text-muted)", cursor: "pointer" }}>↻</button>
         <button type="button" onClick={onClose} title={t("terminal.hide")} aria-label={t("terminal.hide")} style={{ width: 24, height: 24, border: 0, borderRadius: 4, background: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 16 }}>×</button>
       </header>
-      <pre
-        ref={outputRef}
-        tabIndex={0}
-        style={{ flex: 1, minHeight: 0, margin: 0, padding: "8px 10px", overflow: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere", color: "var(--text)", background: "var(--bg)", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.45 }}
-      >
-        {stripAnsi(view.transcript)}
-      </pre>
-      <div style={{ display: "flex", alignItems: "flex-end", gap: 7, flexShrink: 0, padding: "7px 9px", borderTop: "1px solid var(--border)", background: "var(--bg-panel)" }}>
-        <span aria-hidden="true" style={{ padding: "5px 0", color: "var(--accent)", fontFamily: "var(--font-mono)", fontSize: 12 }}>$</span>
-        <textarea
-          ref={inputRef}
-          value={input}
-          disabled={!view.alive || connectionState === "connecting"}
-          rows={1}
-          onChange={(event) => setInput(event.target.value)}
-          onKeyDown={handleInputKeyDown}
-          placeholder={view.busy ? t("terminal.running") : t("terminal.placeholder")}
-          aria-label={t("terminal.commandInput")}
-          style={{ minWidth: 0, flex: 1, maxHeight: 86, resize: "vertical", padding: "5px 7px", border: "1px solid var(--border)", borderRadius: 5, outline: "none", background: "var(--bg)", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.4 }}
-        />
-        <button type="button" onClick={() => void submit()} disabled={!input.trim() || view.busy || !view.alive} style={{ height: 29, padding: "0 11px", border: 0, borderRadius: 5, background: input.trim() && !view.busy && view.alive ? "var(--accent)" : "var(--bg-selected)", color: input.trim() && !view.busy && view.alive ? "#fff" : "var(--text-dim)", cursor: input.trim() && !view.busy && view.alive ? "pointer" : "not-allowed", fontSize: 11, fontWeight: 600 }}>
-          {t("terminal.run")}
-        </button>
-      </div>
+      <div
+        ref={terminalHostRef}
+        onClick={() => terminalRef.current?.focus()}
+        style={{ flex: 1, minHeight: 0, overflow: "hidden", padding: "6px 8px", background: "var(--bg)" }}
+      />
     </section>
   );
 }
