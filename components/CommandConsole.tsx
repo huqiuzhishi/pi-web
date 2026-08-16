@@ -11,6 +11,7 @@ const MIN_HEIGHT = 140;
 const INPUT_FLUSH_DELAY_MS = 8;
 const INPUT_RETRY_DELAY_MS = 100;
 const MAX_INPUT_CHARS_PER_REQUEST = 60_000;
+const TERMINAL_FONT_FAMILY = '"JetBrainsMono Nerd Font Mono", "JetBrainsMono Nerd Font", var(--font-mono)';
 
 function terminalTheme(): ITheme {
   const styles = getComputedStyle(document.documentElement);
@@ -395,7 +396,7 @@ export function CommandConsole({ cwd, open }: Props) {
       <div
         ref={terminalHostRef}
         onClick={() => terminalRef.current?.focus()}
-        style={{ flex: 1, minHeight: 0, overflow: "hidden", padding: "6px 8px", background: "var(--bg)", fontFamily: "var(--font-mono)", fontSize: 12 }}
+        style={{ flex: 1, minHeight: 0, overflow: "hidden", padding: "6px 8px", background: "var(--bg)", fontFamily: TERMINAL_FONT_FAMILY, fontSize: 12 }}
       />
     </section>
   );

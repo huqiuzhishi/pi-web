@@ -26,7 +26,8 @@ test("terminal uses xterm with raw input, PTY resizing, and reconnect replay", (
   assert.match(consoleSource, /getComputedStyle\(terminalHostRef\.current\)/);
   assert.match(consoleSource, /fontFamily: terminalStyles\.fontFamily/);
   assert.match(consoleSource, /fontSize: Number\.parseFloat\(terminalStyles\.fontSize\)/);
-  assert.match(consoleSource, /fontFamily: "var\(--font-mono\)"[\s\S]*fontSize: 12/);
+  assert.match(consoleSource, /JetBrainsMono Nerd Font Mono/);
+  assert.match(consoleSource, /fontFamily: TERMINAL_FONT_FAMILY[\s\S]*fontSize: 12/);
 });
 
 test("terminal uses a single-line divider with an overlaid touch resize target", () => {
