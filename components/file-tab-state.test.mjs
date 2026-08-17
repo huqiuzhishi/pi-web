@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { openFileTab, saveFileViewerState } from "./file-tab-state.ts";
+import {
+  getFilePanelScopeKey,
+  getFilePanelState,
+  moveFilePanelState,
+  openFileTab,
+  saveFileViewerState,
+  updateFilePanelState,
+} from "./file-tab-state.ts";
 
 const tabA = {
   id: "file:/repo/a.ts",
@@ -28,6 +35,52 @@ const openA = {
   filePath: "/repo/a.ts",
   tabId: "file:/repo/a.ts",
 };
+
+test("file panel scope keys separate sessions and fresh drafts", () => {
+  assert.equal(getFilePanelScopeKey("session-1", "ignored-draft"), "session:session-1");
+  assert.equal(getFilePanelScopeKey(null, "new:draft-1:/repo"), "draft:new:draft-1:/repo");
+  assert.equal(getFilePanelScopeKey(null, null), "unscoped");
+});
+
+test("file panel updates affect only one scope", () => {
+  const sessionOne = getFilePanelScopeKey("session-1", null);
+  const sessionTwo = getFilePanelScopeKey("session-2", null);
+  const initial = updateFilePanelState({}, sessionOne, () => ({
+    tabs: [tabA],
+    activeTabId: tabA.id,
+    open: true,
+  }));
+  const updated = updateFilePanelState(initial, sessionTwo, () => ({
+    tabs: [tabB],
+    activeTabId: tabB.id,
+    open: false,
+  }));
+
+  assert.deepEqual(getFilePanelState(updated, sessionOne), {
+    tabs: [tabA],
+    activeTabId: tabA.id,
+    open: true,
+  });
+  assert.deepEqual(getFilePanelState(updated, sessionTwo), {
+    tabs: [tabB],
+    activeTabId: tabB.id,
+    open: false,
+  });
+});
+
+test("a promoted draft keeps its file panel under the real session id", () => {
+  const draft = getFilePanelScopeKey(null, "new:draft-1:/repo");
+  const session = getFilePanelScopeKey("session-1", null);
+  const draftState = { tabs: [tabA], activeTabId: tabA.id, open: true };
+  const moved = moveFilePanelState({ [draft]: draftState }, draft, session);
+
+  assert.strictEqual(getFilePanelState(moved, session), draftState);
+  assert.deepEqual(getFilePanelState(moved, draft), {
+    tabs: [],
+    activeTabId: null,
+    open: false,
+  });
+});
 
 test("saving viewer state updates only the matching revision", () => {
   const tabs = [tabA, tabB];

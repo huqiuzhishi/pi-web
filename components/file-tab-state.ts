@@ -1,6 +1,58 @@
 import type { FileViewerState } from "@/lib/file-viewer-state";
 import type { Tab } from "./TabBar";
 
+export interface FilePanelState {
+  tabs: Tab[];
+  activeTabId: string | null;
+  open: boolean;
+}
+
+export type FilePanelStates = Record<string, FilePanelState>;
+
+const EMPTY_FILE_PANEL_STATE: FilePanelState = {
+  tabs: [],
+  activeTabId: null,
+  open: false,
+};
+
+export function getFilePanelScopeKey(
+  sessionId: string | null,
+  newSessionDraftKey: string | null,
+): string {
+  if (sessionId) return `session:${sessionId}`;
+  if (newSessionDraftKey) return `draft:${newSessionDraftKey}`;
+  return "unscoped";
+}
+
+export function getFilePanelState(
+  states: FilePanelStates,
+  scopeKey: string,
+): FilePanelState {
+  return states[scopeKey] ?? EMPTY_FILE_PANEL_STATE;
+}
+
+export function updateFilePanelState(
+  states: FilePanelStates,
+  scopeKey: string,
+  update: (state: FilePanelState) => FilePanelState,
+): FilePanelStates {
+  const current = getFilePanelState(states, scopeKey);
+  const next = update(current);
+  if (next === current) return states;
+  return { ...states, [scopeKey]: next };
+}
+
+export function moveFilePanelState(
+  states: FilePanelStates,
+  fromScopeKey: string,
+  toScopeKey: string,
+): FilePanelStates {
+  if (fromScopeKey === toScopeKey || !states[fromScopeKey]) return states;
+  const next = { ...states, [toScopeKey]: states[fromScopeKey] };
+  delete next[fromScopeKey];
+  return next;
+}
+
 interface OpenFileTabInput {
   fileName: string;
   filePath: string;

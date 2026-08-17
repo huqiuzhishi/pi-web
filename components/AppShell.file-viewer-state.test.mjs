@@ -29,3 +29,33 @@ test("the active viewer restores tab state and saves it with a revision", () => 
 test("closing the file panel pauses the active viewer watcher", () => {
   assert.match(fileContentBlock(), /watchEnabled=\{rightPanelOpen\}/);
 });
+
+test("file tabs and panel visibility are scoped to the active session or draft", () => {
+  assert.match(source, /filePanelScopeKey = getFilePanelScopeKey\(selectedSession\?\.id \?\? null, newSessionDraftKey\)/);
+  assert.match(source, /filePanelState = getFilePanelState\(filePanelStates, filePanelScopeKey\)/);
+  assert.match(source, /const fileTabs = filePanelState\.tabs/);
+  assert.match(source, /const activeFileTabId = filePanelState\.activeTabId/);
+  assert.match(source, /const rightPanelOpen = filePanelState\.open/);
+});
+
+test("same-path viewers mount independently in different session scopes", () => {
+  const start = source.indexOf("  const handleOpenFile = useCallback");
+  const end = source.indexOf("  const handleOpenLinkedFile", start);
+  assert.notEqual(start, -1, "open-file handler not found");
+  assert.notEqual(end, -1, "end of open-file handler not found");
+
+  const block = source.slice(start, end);
+  assert.match(block, /`file:\$\{filePanelScopeKey\}:\$\{filePath\}`/);
+});
+
+test("a fresh draft transfers its file panel state to the created session", () => {
+  const start = source.indexOf("  const handleSessionCreated = useCallback");
+  const end = source.indexOf("  const deliverSessionNotification", start);
+  assert.notEqual(start, -1, "session-created handler not found");
+  assert.notEqual(end, -1, "end of session-created handler not found");
+
+  const block = source.slice(start, end);
+  assert.match(block, /moveFilePanelState\(/);
+  assert.match(block, /getFilePanelScopeKey\(null, sourceDraftKey\)/);
+  assert.match(block, /getFilePanelScopeKey\(session\.id, null\)/);
+});

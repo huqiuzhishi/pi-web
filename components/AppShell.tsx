@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect, useLayoutEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, type SetStateAction } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar } from "./SessionSidebar";
@@ -8,7 +8,16 @@ import { ChatWindow } from "./ChatWindow";
 import { CommandConsole } from "./CommandConsole";
 import { FileViewer } from "./FileViewer";
 import { TabBar, type Tab } from "./TabBar";
-import { openFileTab, saveFileViewerState } from "./file-tab-state";
+import {
+  getFilePanelScopeKey,
+  getFilePanelState,
+  moveFilePanelState,
+  openFileTab,
+  saveFileViewerState,
+  updateFilePanelState,
+  type FilePanelState,
+  type FilePanelStates,
+} from "./file-tab-state";
 import { ModelsConfig } from "./ModelsConfig";
 import { SkillsConfig } from "./SkillsConfig";
 import { PluginsConfig } from "./PluginsConfig";
@@ -92,6 +101,45 @@ export function AppShell() {
   const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
   const [newSessionDraftId, setNewSessionDraftId] = useState("initial");
   const activeNewSessionDraftKeyRef = useRef<string | null>(null);
+  const [activeCwd, setActiveCwd] = useState<string | null>(null);
+  const effectiveNewSessionCwd = newSessionCwd ?? (selectedSession === null && activeCwd ? activeCwd : null);
+  const newSessionDraftKey = selectedSession === null && effectiveNewSessionCwd
+    ? `new:${newSessionDraftId}:${effectiveNewSessionCwd}`
+    : null;
+  const filePanelScopeKey = getFilePanelScopeKey(selectedSession?.id ?? null, newSessionDraftKey);
+  const [filePanelStates, setFilePanelStates] = useState<FilePanelStates>({});
+  const filePanelState = getFilePanelState(filePanelStates, filePanelScopeKey);
+  const fileTabs = filePanelState.tabs;
+  const activeFileTabId = filePanelState.activeTabId;
+  const rightPanelOpen = filePanelState.open;
+
+  const updateCurrentFilePanel = useCallback((
+    update: (current: FilePanelState) => FilePanelState,
+  ) => {
+    setFilePanelStates((states) => updateFilePanelState(states, filePanelScopeKey, update));
+  }, [filePanelScopeKey]);
+
+  const setFileTabs = useCallback((update: SetStateAction<Tab[]>) => {
+    updateCurrentFilePanel((current) => ({
+      ...current,
+      tabs: typeof update === "function" ? update(current.tabs) : update,
+    }));
+  }, [updateCurrentFilePanel]);
+
+  const setActiveFileTabId = useCallback((update: SetStateAction<string | null>) => {
+    updateCurrentFilePanel((current) => ({
+      ...current,
+      activeTabId: typeof update === "function" ? update(current.activeTabId) : update,
+    }));
+  }, [updateCurrentFilePanel]);
+
+  const setRightPanelOpen = useCallback((update: SetStateAction<boolean>) => {
+    updateCurrentFilePanel((current) => ({
+      ...current,
+      open: typeof update === "function" ? update(current.open) : update,
+    }));
+  }, [updateCurrentFilePanel]);
+
   const [initialCwdStatus, setInitialCwdStatus] = useState<"idle" | "validating" | "ready" | "error">(
     () => initialNavigation.requestedCwd ? "validating" : "idle",
   );
@@ -108,7 +156,6 @@ export function AppShell() {
   const [projectTrustBusy, setProjectTrustBusy] = useState(false);
   const [projectTrustError, setProjectTrustError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [mobileToolbarMoreOpen, setMobileToolbarMoreOpen] = useState(false);
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
@@ -305,7 +352,7 @@ export function AppShell() {
       setMobileToolbarMoreOpen(false);
     }
     setRightPanelOpen((open) => !open);
-  }, [isMobile]);
+  }, [isMobile, setRightPanelOpen]);
 
   useEffect(() => {
     if (!mobileToolbarMoreOpen) return;
@@ -357,10 +404,11 @@ export function AppShell() {
     return () => ro.disconnect();
   }, [activeTopPanel, isMobile]);
 
-  // Right panel — file tabs only
-  const [fileTabs, setFileTabs] = useState<Tab[]>([]);
-  const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
-  const hasDirtyFileTabs = fileTabs.some((tab) => tab.viewerState?.edit?.dirty);
+  // Warn for unsaved edits in every session, including inactive ones whose
+  // file tabs remain available when the user returns to that session.
+  const hasDirtyFileTabs = Object.values(filePanelStates).some((state) => (
+    state.tabs.some((tab) => tab.viewerState?.edit?.dirty)
+  ));
 
   useEffect(() => {
     if (!hasDirtyFileTabs) return;
@@ -378,28 +426,27 @@ export function AppShell() {
     viewerState: FileViewerState,
   ) => {
     setFileTabs((prev) => saveFileViewerState(prev, tabId, viewerRevision, viewerState));
-  }, []);
+  }, [setFileTabs]);
 
   // Same @mention format as the chat input's @ autocomplete, so the agent's
   // read tool resolves it the same way (it strips the @ prefix).
   const handleAtMention = useCallback((relativePath: string, isDir: boolean) => {
     chatInputRef.current?.insertText(buildAtMentionText(relativePath, isDir));
     if (isMobile) { setRightPanelOpen(false); setSidebarOpen(false); }
-  }, [isMobile]);
+  }, [isMobile, setRightPanelOpen]);
 
   const handleAtMentions = useCallback((relativePaths: string[]) => {
     const mentions = buildFileAtMentionsText(relativePaths);
     if (mentions) chatInputRef.current?.insertText(mentions);
     if (isMobile) { setRightPanelOpen(false); setSidebarOpen(false); }
-  }, [isMobile]);
+  }, [isMobile, setRightPanelOpen]);
 
   const handleFileLineMention = useCallback((relativePath: string, startLine: number, endLine: number) => {
     chatInputRef.current?.insertText(buildFileLineMentionText(relativePath, startLine, endLine));
     if (isMobile) { setRightPanelOpen(false); setSidebarOpen(false); }
-  }, [isMobile]);
+  }, [isMobile, setRightPanelOpen]);
 
   const initialSessionId = initialNavigation.sessionId;
-  const [activeCwd, setActiveCwd] = useState<string | null>(null);
   const activeProjectKeyRef = useRef<string | null>(null);
   // True once the initial ?session= URL param has been resolved (or confirmed absent)
   const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !initialSessionId);
@@ -554,11 +601,6 @@ export function AppShell() {
     setSystemPromptLoading(false);
     setActiveTopPanel(null);
     if (currentProject !== newProject) {
-      // File tabs are keyed by absolute path, so tabs opened in the previous
-      // project must not linger. Same-project worktree switches keep them.
-      setFileTabs([]);
-      setActiveFileTabId(null);
-      setRightPanelOpen(false);
       // Restore the workspace we switched to: its last open session, or keep
       // the default welcome page when none is remembered.
       restoreWorkspaceContext(newProject);
@@ -648,6 +690,11 @@ export function AppShell() {
     setRefreshKey((k) => k + 1);
     if (activeNewSessionDraftKeyRef.current !== sourceDraftKey) return;
     invalidateWorkspaceRestore();
+    setFilePanelStates((states) => moveFilePanelState(
+      states,
+      getFilePanelScopeKey(null, sourceDraftKey),
+      getFilePanelScopeKey(session.id, null),
+    ));
     activeNewSessionDraftKeyRef.current = null;
     setNewSessionCwd(null);
     setSelectedSession(session);
@@ -805,7 +852,11 @@ export function AppShell() {
   ) => {
     const sourceSessionId = options?.sourceSessionId;
     const modeHint = options?.modeHint;
-    const tabId = `file:${filePath}`;
+    // Scope new tab identities so two sessions viewing the same absolute path
+    // still mount independent viewers. A draft's existing id is retained when
+    // it is promoted to a real session.
+    const tabId = fileTabs.find((tab) => tab.filePath === filePath)?.id
+      ?? `file:${filePanelScopeKey}:${filePath}`;
     setFileTabs((prev) => openFileTab(prev, {
       fileName,
       filePath,
@@ -817,7 +868,7 @@ export function AppShell() {
     setRightPanelOpen(true);
     // On mobile the file panel is full-screen; close the drawer so it shows.
     if (isMobile) setSidebarOpen(false);
-  }, [isMobile]);
+  }, [filePanelScopeKey, fileTabs, isMobile, setActiveFileTabId, setFileTabs, setRightPanelOpen]);
 
   const handleOpenLinkedFile = useCallback((filePath: string) => {
     handleOpenFile(filePath, getFileName(filePath), { sourceSessionId: selectedSession?.id ?? null });
@@ -826,9 +877,9 @@ export function AppShell() {
   const handleFileReverted = useCallback((previousPath: string, restoredPath: string | null) => {
     if (restoredPath === previousPath) return;
 
-    const previousTabId = `file:${previousPath}`;
-    const previousTab = fileTabs.find((tab) => tab.id === previousTabId);
-    const remainingTabs = fileTabs.filter((tab) => tab.id !== previousTabId);
+    const previousTab = fileTabs.find((tab) => tab.filePath === previousPath);
+    if (!previousTab) return;
+    const remainingTabs = fileTabs.filter((tab) => tab.id !== previousTab.id);
     setFileTabs(remainingTabs);
 
     if (restoredPath) {
@@ -841,7 +892,7 @@ export function AppShell() {
     const nextActiveTabId = remainingTabs.at(-1)?.id ?? null;
     setActiveFileTabId(nextActiveTabId);
     if (!nextActiveTabId) setRightPanelOpen(false);
-  }, [fileTabs, handleOpenFile]);
+  }, [fileTabs, handleOpenFile, setActiveFileTabId, setFileTabs, setRightPanelOpen]);
 
   const handleCloseFileTab = useCallback((tabId: string) => {
     const closingTab = fileTabs.find((tab) => tab.id === tabId);
@@ -859,7 +910,7 @@ export function AppShell() {
       const remaining = fileTabs.filter((t) => t.id !== tabId);
       return remaining.length > 0 ? remaining[remaining.length - 1].id : null;
     });
-  }, [fileTabs, translate]);
+  }, [fileTabs, setActiveFileTabId, setFileTabs, setRightPanelOpen, translate]);
 
   const handleViewFullHistory = useCallback(() => {
     if (!selectedSession) return;
@@ -871,10 +922,6 @@ export function AppShell() {
   }, [selectedSession]);
 
   // Show chat area if a session is selected, or if we have a cwd to start a new session in
-  const effectiveNewSessionCwd = newSessionCwd ?? (selectedSession === null && activeCwd ? activeCwd : null);
-  const newSessionDraftKey = selectedSession === null && effectiveNewSessionCwd
-    ? `new:${newSessionDraftId}:${effectiveNewSessionCwd}`
-    : null;
   useLayoutEffect(() => {
     activeNewSessionDraftKeyRef.current = newSessionDraftKey;
   }, [newSessionDraftKey]);
