@@ -15,6 +15,146 @@ const EMPTY_FILE_PANEL_STATE: FilePanelState = {
   open: false,
 };
 
+const FILE_PANEL_STORAGE_KEY = "pi-web:file-panels";
+const FILE_PANEL_STORAGE_VERSION = 1;
+const MAX_PERSISTED_FILE_PANEL_SCOPES = 50;
+
+interface StorageLike {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+}
+
+function getBrowserStorage(): StorageLike | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isDisplayMode(value: unknown): value is NonNullable<Tab["initialDisplayMode"]> {
+  return value === "source" || value === "preview" || value === "diff";
+}
+
+function restoreTab(value: unknown): Tab | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.id !== "string" || typeof value.label !== "string" || typeof value.filePath !== "string") {
+    return null;
+  }
+
+  const tab: Tab = {
+    id: value.id,
+    label: value.label,
+    filePath: value.filePath,
+  };
+  if (typeof value.sourceSessionId === "string" || value.sourceSessionId === null) {
+    tab.sourceSessionId = value.sourceSessionId;
+  }
+  if (isDisplayMode(value.initialDisplayMode)) tab.initialDisplayMode = value.initialDisplayMode;
+  if (Number.isSafeInteger(value.viewerRevision) && (value.viewerRevision as number) >= 0) {
+    tab.viewerRevision = value.viewerRevision as number;
+  }
+
+  if (isRecord(value.viewerState)) {
+    const state = value.viewerState;
+    if (
+      isDisplayMode(state.displayMode)
+      && typeof state.wrapLines === "boolean"
+      && typeof state.scrollTop === "number" && Number.isFinite(state.scrollTop)
+      && typeof state.scrollLeft === "number" && Number.isFinite(state.scrollLeft)
+    ) {
+      tab.viewerState = {
+        displayMode: state.displayMode,
+        wrapLines: state.wrapLines,
+        scrollTop: Math.max(0, state.scrollTop),
+        scrollLeft: Math.max(0, state.scrollLeft),
+      };
+    }
+  }
+  return tab;
+}
+
+function restorePanel(value: unknown): FilePanelState | null {
+  if (!isRecord(value) || !Array.isArray(value.tabs) || typeof value.open !== "boolean") return null;
+  const tabs = value.tabs.map(restoreTab).filter((tab): tab is Tab => tab !== null);
+  const requestedActiveTabId = typeof value.activeTabId === "string" ? value.activeTabId : null;
+  return {
+    tabs,
+    activeTabId: tabs.some((tab) => tab.id === requestedActiveTabId)
+      ? requestedActiveTabId
+      : (tabs.at(-1)?.id ?? null),
+    open: value.open,
+  };
+}
+
+/** Restore file tabs and lightweight viewer state after a browser refresh. */
+export function loadFilePanelStates(
+  storage: StorageLike | null = getBrowserStorage(),
+): FilePanelStates {
+  if (!storage) return {};
+  try {
+    const raw = storage.getItem(FILE_PANEL_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (!isRecord(parsed) || parsed.version !== FILE_PANEL_STORAGE_VERSION || !isRecord(parsed.states)) {
+      return {};
+    }
+    return Object.fromEntries(
+      Object.entries(parsed.states)
+        .map(([scopeKey, value]) => [scopeKey, restorePanel(value)] as const)
+        .filter((entry): entry is readonly [string, FilePanelState] => entry[1] !== null),
+    );
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Persist open file views. Editor buffers are intentionally excluded: they can
+ * be arbitrarily large and should not turn localStorage into a second file store.
+ */
+export function persistFilePanelStates(
+  states: FilePanelStates,
+  storage: StorageLike | null = getBrowserStorage(),
+): void {
+  if (!storage) return;
+  try {
+    const entries = Object.entries(states)
+      .filter(([, state]) => state.open || state.tabs.length > 0)
+      .slice(-MAX_PERSISTED_FILE_PANEL_SCOPES)
+      .map(([scopeKey, state]) => [scopeKey, {
+        ...state,
+        tabs: state.tabs.map((tab) => ({
+          ...tab,
+          ...(tab.viewerState ? {
+            viewerState: {
+              displayMode: tab.viewerState.displayMode,
+              wrapLines: tab.viewerState.wrapLines,
+              scrollTop: tab.viewerState.scrollTop,
+              scrollLeft: tab.viewerState.scrollLeft,
+            },
+          } : {}),
+        })),
+      }]);
+    if (entries.length === 0) {
+      storage.removeItem(FILE_PANEL_STORAGE_KEY);
+      return;
+    }
+    storage.setItem(FILE_PANEL_STORAGE_KEY, JSON.stringify({
+      version: FILE_PANEL_STORAGE_VERSION,
+      states: Object.fromEntries(entries),
+    }));
+  } catch {
+    // Browser storage is best-effort (private mode, quota, or disabled storage).
+  }
+}
+
 export function getFilePanelScopeKey(
   sessionId: string | null,
   newSessionDraftKey: string | null,

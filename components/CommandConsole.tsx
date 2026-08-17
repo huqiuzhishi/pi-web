@@ -4,6 +4,11 @@ import { useCallback, useEffect, useRef, useState, type PointerEvent } from "rea
 import type { FitAddon } from "@xterm/addon-fit";
 import type { ITheme, Terminal } from "@xterm/xterm";
 import type { CommandConsoleEvent, CommandConsoleWireEvent } from "@/lib/command-console";
+import {
+  forgetRememberedTerminal,
+  getRememberedTerminalId,
+  rememberTerminalId,
+} from "@/lib/terminal-memory";
 import { useI18n } from "@/hooks/useI18n";
 
 const DEFAULT_HEIGHT = 260;
@@ -185,10 +190,12 @@ export function CommandConsole({ cwd, open }: Props) {
     inputSequenceRef.current = 1;
     canSendInputRef.current = false;
     const id = sessionIdRef.current;
+    const root = sessionRootRef.current;
     sessionIdRef.current = null;
     sessionRootRef.current = null;
     creatingRef.current = false;
     if (deleteRemote && id) {
+      if (root) forgetRememberedTerminal(root, id);
       void fetch(`/api/terminal/${encodeURIComponent(id)}`, {
         method: "DELETE",
         keepalive: true,
@@ -231,7 +238,38 @@ export function CommandConsole({ cwd, open }: Props) {
       cols: terminalRef.current.cols,
       rows: terminalRef.current.rows,
     };
+
+    const connect = (id: string) => {
+      if (generation !== generationRef.current) return;
+      sessionIdRef.current = id;
+      sessionRootRef.current = root;
+      rememberTerminalId(root, id);
+      const source = new EventSource(`/api/terminal/${encodeURIComponent(id)}/events`);
+      eventSourceRef.current = source;
+      source.onmessage = (message) => {
+        if (generation !== generationRef.current) return;
+        try {
+          handleWireEvent(JSON.parse(message.data) as CommandConsoleWireEvent);
+        } catch {
+          // Ignore malformed transport events and keep the terminal connected.
+        }
+      };
+    };
+
     try {
+      const rememberedId = getRememberedTerminalId(root);
+      if (rememberedId) {
+        const response = await fetch(`/api/terminal/${encodeURIComponent(rememberedId)}`, {
+          cache: "no-store",
+        });
+        const data = await response.json().catch(() => ({})) as { id?: string; cwd?: string };
+        if (response.ok && data.id === rememberedId && data.cwd === root) {
+          connect(rememberedId);
+          return;
+        }
+        forgetRememberedTerminal(root, rememberedId);
+      }
+
       const response = await fetch("/api/terminal", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -245,19 +283,7 @@ export function CommandConsole({ cwd, open }: Props) {
         void fetch(`/api/terminal/${encodeURIComponent(data.id)}`, { method: "DELETE", keepalive: true });
         return;
       }
-
-      sessionIdRef.current = data.id;
-      sessionRootRef.current = root;
-      const source = new EventSource(`/api/terminal/${encodeURIComponent(data.id)}/events`);
-      eventSourceRef.current = source;
-      source.onmessage = (message) => {
-        if (generation !== generationRef.current) return;
-        try {
-          handleWireEvent(JSON.parse(message.data) as CommandConsoleWireEvent);
-        } catch {
-          // Ignore malformed transport events and keep the terminal connected.
-        }
-      };
+      connect(data.id);
     } catch (error) {
       if (generation !== generationRef.current) return;
       showTransportError(error instanceof Error ? error.message : String(error));
@@ -311,7 +337,9 @@ export function CommandConsole({ cwd, open }: Props) {
 
   useEffect(() => {
     if (sessionIdRef.current && sessionRootRef.current !== cwd) {
-      closeTransport(true);
+      // Disconnect the browser only. The workspace PTY stays alive so returning
+      // to it (or refreshing the page) can replay and continue the same shell.
+      closeTransport(false);
       terminalRef.current?.reset();
     }
     if (open && cwd && terminalReady && !sessionIdRef.current && !creatingRef.current) {
@@ -319,7 +347,7 @@ export function CommandConsole({ cwd, open }: Props) {
     }
   }, [closeTransport, cwd, open, startConsole, terminalReady]);
 
-  useEffect(() => () => closeTransport(true), [closeTransport]);
+  useEffect(() => () => closeTransport(false), [closeTransport]);
 
   useEffect(() => {
     const host = terminalHostRef.current;

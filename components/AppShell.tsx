@@ -11,8 +11,10 @@ import { TabBar, type Tab } from "./TabBar";
 import {
   getFilePanelScopeKey,
   getFilePanelState,
+  loadFilePanelStates,
   moveFilePanelState,
   openFileTab,
+  persistFilePanelStates,
   saveFileViewerState,
   updateFilePanelState,
   type FilePanelState,
@@ -70,6 +72,7 @@ type AutoNameStatus =
 
 const TOP_BAR_ICON_BUTTON_SIZE = 36;
 const LANGUAGE_MENU_WIDTH = 176;
+const TERMINAL_OPEN_STORAGE_KEY = "pi-web:terminal-open";
 
 export function AppShell() {
   const router = useRouter();
@@ -108,6 +111,9 @@ export function AppShell() {
     : null;
   const filePanelScopeKey = getFilePanelScopeKey(selectedSession?.id ?? null, newSessionDraftKey);
   const [filePanelStates, setFilePanelStates] = useState<FilePanelStates>({});
+  const [filePanelStorageReady, setFilePanelStorageReady] = useState(false);
+  const filePanelStatesRef = useRef(filePanelStates);
+  filePanelStatesRef.current = filePanelStates;
   const filePanelState = getFilePanelState(filePanelStates, filePanelScopeKey);
   const fileTabs = filePanelState.tabs;
   const activeFileTabId = filePanelState.activeTabId;
@@ -157,6 +163,7 @@ export function AppShell() {
   const [projectTrustError, setProjectTrustError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [terminalOpen, setTerminalOpen] = useState(false);
+  const [terminalOpenStorageReady, setTerminalOpenStorageReady] = useState(false);
   const [mobileToolbarMoreOpen, setMobileToolbarMoreOpen] = useState(false);
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
   const sidebarWidthRef = useRef(SIDEBAR_DEFAULT_WIDTH);
@@ -220,6 +227,40 @@ export function AppShell() {
   useEffect(() => {
     setMobileSidebarReady(true);
   }, []);
+
+  useEffect(() => {
+    setFilePanelStates(loadFilePanelStates());
+    setFilePanelStorageReady(true);
+    try {
+      setTerminalOpen(window.localStorage.getItem(TERMINAL_OPEN_STORAGE_KEY) === "true");
+    } catch {
+      // Browser storage is best-effort.
+    }
+    setTerminalOpenStorageReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (!filePanelStorageReady) return;
+    const timeout = setTimeout(() => persistFilePanelStates(filePanelStates), 150);
+    return () => clearTimeout(timeout);
+  }, [filePanelStates, filePanelStorageReady]);
+
+  useEffect(() => {
+    if (!filePanelStorageReady) return;
+    const persistCurrentFilePanels = () => persistFilePanelStates(filePanelStatesRef.current);
+    window.addEventListener("pagehide", persistCurrentFilePanels);
+    return () => window.removeEventListener("pagehide", persistCurrentFilePanels);
+  }, [filePanelStorageReady]);
+
+  useEffect(() => {
+    if (!terminalOpenStorageReady) return;
+    try {
+      window.localStorage.setItem(TERMINAL_OPEN_STORAGE_KEY, String(terminalOpen));
+    } catch {
+      // Browser storage is best-effort.
+    }
+  }, [terminalOpen, terminalOpenStorageReady]);
+
   useEffect(() => {
     if (!rightPanelOpen) return;
     reclampSidebarWidth();

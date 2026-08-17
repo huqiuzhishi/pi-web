@@ -4,8 +4,10 @@ import test from "node:test";
 import {
   getFilePanelScopeKey,
   getFilePanelState,
+  loadFilePanelStates,
   moveFilePanelState,
   openFileTab,
+  persistFilePanelStates,
   saveFileViewerState,
   updateFilePanelState,
 } from "./file-tab-state.ts";
@@ -36,10 +38,54 @@ const openA = {
   tabId: "file:/repo/a.ts",
 };
 
+function createStorage() {
+  const values = new Map();
+  return {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key),
+  };
+}
+
 test("file panel scope keys separate sessions and fresh drafts", () => {
   assert.equal(getFilePanelScopeKey("session-1", "ignored-draft"), "session:session-1");
   assert.equal(getFilePanelScopeKey(null, "new:draft-1:/repo"), "draft:new:draft-1:/repo");
   assert.equal(getFilePanelScopeKey(null, null), "unscoped");
+});
+
+test("file panels survive a browser-storage round trip", () => {
+  const storage = createStorage();
+  const edit = {
+    active: true,
+    draft: "changed",
+    baseContent: "original",
+    baseVersion: { mtimeMs: 1, size: 8, sha256: "a".repeat(64) },
+    dirty: true,
+  };
+  const state = {
+    "session:one": {
+      tabs: [{ ...tabA, viewerState: { ...tabA.viewerState, edit } }, tabB],
+      activeTabId: tabA.id,
+      open: true,
+    },
+  };
+
+  persistFilePanelStates(state, storage);
+  const restored = loadFilePanelStates(storage);
+
+  assert.deepEqual(restored, {
+    "session:one": {
+      tabs: [tabA, tabB],
+      activeTabId: tabA.id,
+      open: true,
+    },
+  });
+});
+
+test("malformed persisted file panels are ignored", () => {
+  const storage = createStorage();
+  storage.setItem("pi-web:file-panels", JSON.stringify({ version: 1, states: { broken: { tabs: "no" } } }));
+  assert.deepEqual(loadFilePanelStates(storage), {});
 });
 
 test("file panel updates affect only one scope", () => {

@@ -4,6 +4,7 @@ import test from "node:test";
 
 const consoleSource = await readFile(new URL("./CommandConsole.tsx", import.meta.url), "utf8");
 const shellSource = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
+const terminalRouteSource = await readFile(new URL("../app/api/terminal/[id]/route.ts", import.meta.url), "utf8");
 const globalStyles = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
 
 test("mounts a workspace-scoped terminal as a bottom panel", () => {
@@ -28,6 +29,22 @@ test("terminal uses xterm with raw input, PTY resizing, and reconnect replay", (
   assert.match(consoleSource, /fontSize: Number\.parseFloat\(terminalStyles\.fontSize\)/);
   assert.match(consoleSource, /JetBrainsMono Nerd Font Mono/);
   assert.match(consoleSource, /fontFamily: TERMINAL_FONT_FAMILY[\s\S]*fontSize: 12/);
+});
+
+test("terminal reconnects to the workspace PTY across refreshes", () => {
+  assert.match(consoleSource, /getRememberedTerminalId\(root\)/);
+  assert.match(consoleSource, /fetch\(`\/api\/terminal\/\$\{encodeURIComponent\(rememberedId\)\}`/);
+  assert.match(consoleSource, /rememberTerminalId\(root, id\)/);
+  assert.match(consoleSource, /useEffect\(\(\) => \(\) => closeTransport\(false\)/);
+  assert.doesNotMatch(consoleSource, /closeTransport\(true\)/);
+  assert.match(terminalRouteSource, /export async function GET/);
+  assert.match(terminalRouteSource, /cwd: session\.initialCwd/);
+});
+
+test("terminal panel visibility and file views are restored from browser storage", () => {
+  assert.match(shellSource, /loadFilePanelStates\(\)/);
+  assert.match(shellSource, /persistFilePanelStates\(filePanelStates/);
+  assert.match(shellSource, /TERMINAL_OPEN_STORAGE_KEY/);
 });
 
 test("terminal uses a single-line divider with an overlaid touch resize target", () => {

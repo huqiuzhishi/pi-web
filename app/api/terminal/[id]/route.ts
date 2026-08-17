@@ -9,6 +9,19 @@ interface RouteContext {
   params: Promise<{ id: string }>;
 }
 
+// GET /api/terminal/:id - metadata used to reconnect after a page refresh.
+export async function GET(_request: Request, { params }: RouteContext) {
+  const { id } = await params;
+  const session = getCommandConsoleSession(id);
+  if (!session) return NextResponse.json({ error: "Terminal not found" }, { status: 404 });
+  return NextResponse.json({
+    id: session.id,
+    cwd: session.initialCwd,
+    alive: session.isAlive,
+    ...session.dimensions,
+  });
+}
+
 // POST /api/terminal/:id
 // body: { action: "input", sequence, data } | { action: "resize", cols, rows } | { action: "clear" }
 export async function POST(request: Request, { params }: RouteContext) {
